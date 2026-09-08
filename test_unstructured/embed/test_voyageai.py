@@ -68,12 +68,15 @@ def test_embed_documents_voyage_3_5_lite(mocker):
 
 
 def test_embed_documents_contextual_model(mocker):
-    """Test embedding with voyage-context-3 model."""
-    # Mock contextualized_embed response
+    """Test embedding with voyage-context-4 model using server-side auto-chunking."""
+    # With auto-chunking, contextualized_embed returns one result per input
+    # document, each carrying that document's chunk embeddings.
     contextualized_response = Mock()
-    result_item = Mock()
-    result_item.embeddings = [[1.0] * 1024, [2.0] * 1024]
-    contextualized_response.results = [result_item]
+    result_item_1 = Mock()
+    result_item_1.embeddings = [[1.0] * 1024]
+    result_item_2 = Mock()
+    result_item_2.embeddings = [[2.0] * 1024]
+    contextualized_response.results = [result_item_1, result_item_2]
 
     mock_client = mocker.MagicMock()
     mock_client.contextualized_embed.return_value = contextualized_response
@@ -82,7 +85,7 @@ def test_embed_documents_contextual_model(mocker):
     mocker.patch.object(VoyageAIEmbeddingConfig, "get_client", return_value=mock_client)
 
     encoder = VoyageAIEmbeddingEncoder(
-        config=VoyageAIEmbeddingConfig(api_key="api_key", model_name="voyage-context-3")
+        config=VoyageAIEmbeddingConfig(api_key="api_key", model_name="voyage-context-4")
     )
     elements = encoder.embed_documents(
         elements=[Text("Context document 1"), Text("Context document 2")],
@@ -90,8 +93,35 @@ def test_embed_documents_contextual_model(mocker):
     assert len(elements) == 2
     assert len(elements[0].embeddings) == 1024
     assert len(elements[1].embeddings) == 1024
-    # Verify contextualized_embed was called
+    # Verify contextualized_embed was called with a flat list[str] and auto-chunking.
     mock_client.contextualized_embed.assert_called_once()
+    call_kwargs = mock_client.contextualized_embed.call_args[1]
+    assert call_kwargs["inputs"] == ["Context document 1", "Context document 2"]
+    assert call_kwargs["input_type"] == "document"
+    assert call_kwargs["enable_auto_chunking"] is True
+    assert call_kwargs["chunk_size"] == 32_000
+
+
+def test_embed_documents_contextual_model_mean_pools_multi_chunk(mocker):
+    """A document split into several chunks collapses to one mean-pooled vector."""
+    contextualized_response = Mock()
+    result_item = Mock()
+    # Single input document that the server split into two chunks.
+    result_item.embeddings = [[0.0] * 4, [2.0] * 4]
+    contextualized_response.results = [result_item]
+
+    mock_client = mocker.MagicMock()
+    mock_client.contextualized_embed.return_value = contextualized_response
+    mock_client.tokenize.return_value = [[1, 2]]
+
+    mocker.patch.object(VoyageAIEmbeddingConfig, "get_client", return_value=mock_client)
+
+    encoder = VoyageAIEmbeddingEncoder(
+        config=VoyageAIEmbeddingConfig(api_key="api_key", model_name="voyage-context-4")
+    )
+    elements = encoder.embed_documents(elements=[Text("Long context document")])
+    assert len(elements) == 1
+    assert elements[0].embeddings == [1.0] * 4
 
 
 def test_count_tokens(mocker):
@@ -135,9 +165,19 @@ def test_get_token_limit(mocker):
     config_lite = VoyageAIEmbeddingConfig(api_key="api_key", model_name="voyage-3.5-lite")
     assert config_lite.get_token_limit() == 1_000_000
 
-    # Test context model
-    config_context = VoyageAIEmbeddingConfig(api_key="api_key", model_name="voyage-context-3")
+    # Test context models
+    config_context = VoyageAIEmbeddingConfig(api_key="api_key", model_name="voyage-context-4")
     assert config_context.get_token_limit() == 32_000
+    config_context_legacy = VoyageAIEmbeddingConfig(
+        api_key="api_key", model_name="voyage-context-3"
+    )
+    assert config_context_legacy.get_token_limit() == 32_000
+
+    # Test voyage-4 family
+    config_v4 = VoyageAIEmbeddingConfig(api_key="api_key", model_name="voyage-4")
+    assert config_v4.get_token_limit() == 320_000
+    config_v4_large = VoyageAIEmbeddingConfig(api_key="api_key", model_name="voyage-4-large")
+    assert config_v4_large.get_token_limit() == 120_000
 
     # Test voyage-2 model
     config_v2 = VoyageAIEmbeddingConfig(api_key="api_key", model_name="voyage-2")

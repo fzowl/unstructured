@@ -11,9 +11,24 @@ from unstructured.utils import requires_dependencies
 if TYPE_CHECKING:
     from voyageai import Client
 
-# Token limits for different VoyageAI models
+# Total-token-per-request limits for the different VoyageAI by MongoDB models.
+# Keep this list in sync with the models currently offered at https://docs.voyageai.com.
 VOYAGE_TOTAL_TOKEN_LIMITS = {
+    # Contextualized-chunk embedding models
+    "voyage-context-4": 32_000,
     "voyage-context-3": 32_000,
+    # Current general-purpose text embedding models (voyage-4 family)
+    "voyage-4-lite": 1_000_000,
+    "voyage-4": 320_000,
+    "voyage-4-large": 120_000,
+    # Domain-specific and code models
+    "voyage-code-4": 120_000,
+    "voyage-finance-2": 120_000,
+    "voyage-law-2": 120_000,
+    # Multimodal models
+    "voyage-multimodal-3.5": 120_000,
+    "voyage-multimodal-3": 120_000,
+    # Legacy models (still API-accessible)
     "voyage-3.5-lite": 1_000_000,
     "voyage-3.5": 320_000,
     "voyage-2": 320_000,
@@ -21,19 +36,20 @@ VOYAGE_TOTAL_TOKEN_LIMITS = {
     "voyage-3-large": 120_000,
     "voyage-code-3": 120_000,
     "voyage-large-2-instruct": 120_000,
-    "voyage-finance-2": 120_000,
     "voyage-multilingual-2": 120_000,
-    "voyage-law-2": 120_000,
     "voyage-large-2": 120_000,
     "voyage-3": 120_000,
     "voyage-3-lite": 120_000,
     "voyage-code-2": 120_000,
     "voyage-3-m-exp": 120_000,
-    "voyage-multimodal-3": 120_000,
 }
 
 # Batch size for embedding requests (max documents per batch)
 MAX_BATCH_SIZE = 1000
+
+# Target chunk size (in tokens) for server-side auto-chunking on contextualized
+# embedding models. Matches the models' 32K per-chunk context window.
+CONTEXT_CHUNK_SIZE = 32_000
 
 
 class VoyageAIEmbeddingConfig(EmbeddingConfig):
@@ -49,7 +65,7 @@ class VoyageAIEmbeddingConfig(EmbeddingConfig):
         extras="embed-voyageai",
     )
     def get_client(self) -> "Client":
-        """Creates a VoyageAI python client to embed elements."""
+        """Creates a VoyageAI by MongoDB python client to embed elements."""
         from voyageai import Client
 
         return Client(
@@ -91,7 +107,7 @@ class VoyageAIEmbeddingEncoder(BaseEmbeddingEncoder):
 
         Args:
             texts: List of texts to batch.
-            client: VoyageAI client instance to use for tokenization.
+            client: VoyageAI by MongoDB client instance to use for tokenization.
 
         Yields:
             Batches of texts as lists.
@@ -135,20 +151,49 @@ class VoyageAIEmbeddingEncoder(BaseEmbeddingEncoder):
 
         Args:
             batch: List of texts to embed.
-            client: VoyageAI client instance to use for embedding.
+            client: VoyageAI by MongoDB client instance to use for embedding.
             input_type: Type of input ("document" or "query").
 
         Returns:
             List of embedding vectors.
         """
         if self._is_context_model():
-            result = client.contextualized_embed(
-                inputs=[batch],
-                model=self.config.model_name,
-                input_type=input_type,
-                output_dimension=self.config.output_dimension,
-            )
-            return [list(emb) for emb in result.results[0].embeddings]
+            if input_type == "document":
+                # Auto-chunking requires a flat list[str] of documents and
+                # input_type="document"; the server chunks each document and
+                # returns one result per input document.
+                result = client.contextualized_embed(
+                    inputs=batch,
+                    model=self.config.model_name,
+                    input_type="document",
+                    enable_auto_chunking=True,
+                    chunk_size=CONTEXT_CHUNK_SIZE,
+                    output_dimension=self.config.output_dimension,
+                )
+                # Collapse each document's chunk embeddings into a single vector
+                # so elements stay 1:1 with embeddings. With chunk_size=32K,
+                # normal-sized elements yield exactly one chunk; larger ones are
+                # mean-pooled across their chunks.
+                embeddings: List[List[float]] = []
+                for item in result.results:
+                    chunk_embeddings = [list(emb) for emb in item.embeddings]
+                    if len(chunk_embeddings) == 1:
+                        embeddings.append(chunk_embeddings[0])
+                    else:
+                        embeddings.append(
+                            np.mean(np.array(chunk_embeddings), axis=0).tolist()
+                        )
+                return embeddings
+            else:
+                # Queries can't use server-side auto-chunking; embed the batch as
+                # a single context group.
+                result = client.contextualized_embed(
+                    inputs=[batch],
+                    model=self.config.model_name,
+                    input_type=input_type,
+                    output_dimension=self.config.output_dimension,
+                )
+                return [list(emb) for emb in result.results[0].embeddings]
         else:
             result = client.embed(
                 texts=batch,

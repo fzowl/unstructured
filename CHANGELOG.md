@@ -1,3 +1,10 @@
+## 0.27.6-dev0
+
+### Enhancements
+
+- **Refresh the VoyageAI by MongoDB embedding models and rebrand.** Voyage AI is now VoyageAI by MongoDB; user-facing strings in the embedding integration are updated accordingly. The supported-model token-limit table is refreshed to the models currently offered at docs.voyageai.com — adding the `voyage-4` family (`voyage-4`, `voyage-4-large`, `voyage-4-lite`), `voyage-code-4`, `voyage-context-4`, and `voyage-multimodal-3.5`, while keeping legacy models API-accessible.
+- **Contextualized embeddings use server-side auto-chunking.** For contextual models (`voyage-context-*`), `contextualized_embed` is now called with a flat `list[str]` of documents, `enable_auto_chunking=True`, and `chunk_size=32000`. Each document's chunk embeddings are collapsed to a single vector (mean-pooled when a document spans multiple chunks) so elements stay 1:1 with embeddings.
+
 ## 0.27.5
 
 ### Fixes
