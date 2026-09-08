@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Iterable, List, Optional
+from typing import TYPE_CHECKING, Iterable, List, Optional, Union
 
 import numpy as np
 from pydantic import Field, SecretStr
@@ -11,8 +11,20 @@ from unstructured.utils import requires_dependencies
 if TYPE_CHECKING:
     from voyageai import Client
 
-# Token limits for different VoyageAI models
+# Total tokens allowed per request (batch limit) for each VoyageAI by MongoDB model.
+# Kept in sync with the models listed at https://docs.voyageai.com/docs/embeddings
 VOYAGE_TOTAL_TOKEN_LIMITS = {
+    # Current models
+    "voyage-4-lite": 1_000_000,
+    "voyage-4": 320_000,
+    "voyage-4-large": 120_000,
+    "voyage-4-nano": 120_000,
+    "voyage-code-4": 120_000,
+    "voyage-context-4": 32_000,
+    "voyage-finance-2": 120_000,
+    "voyage-law-2": 120_000,
+    "voyage-code-2": 120_000,
+    # Legacy models (still accessible via the API)
     "voyage-context-3": 32_000,
     "voyage-3.5-lite": 1_000_000,
     "voyage-3.5": 320_000,
@@ -21,13 +33,10 @@ VOYAGE_TOTAL_TOKEN_LIMITS = {
     "voyage-3-large": 120_000,
     "voyage-code-3": 120_000,
     "voyage-large-2-instruct": 120_000,
-    "voyage-finance-2": 120_000,
     "voyage-multilingual-2": 120_000,
-    "voyage-law-2": 120_000,
     "voyage-large-2": 120_000,
     "voyage-3": 120_000,
     "voyage-3-lite": 120_000,
-    "voyage-code-2": 120_000,
     "voyage-3-m-exp": 120_000,
     "voyage-multimodal-3": 120_000,
 }
@@ -49,7 +58,7 @@ class VoyageAIEmbeddingConfig(EmbeddingConfig):
         extras="embed-voyageai",
     )
     def get_client(self) -> "Client":
-        """Creates a VoyageAI python client to embed elements."""
+        """Creates a VoyageAI by MongoDB python client to embed elements."""
         from voyageai import Client
 
         return Client(
@@ -63,6 +72,8 @@ class VoyageAIEmbeddingConfig(EmbeddingConfig):
 
 @dataclass
 class VoyageAIEmbeddingEncoder(BaseEmbeddingEncoder):
+    """Embedding encoder backed by VoyageAI by MongoDB embedding models."""
+
     config: VoyageAIEmbeddingConfig
 
     def get_exemplary_embedding(self) -> List[float]:
@@ -91,7 +102,7 @@ class VoyageAIEmbeddingEncoder(BaseEmbeddingEncoder):
 
         Args:
             texts: List of texts to batch.
-            client: VoyageAI client instance to use for tokenization.
+            client: VoyageAI by MongoDB client instance to use for tokenization.
 
         Yields:
             Batches of texts as lists.
@@ -135,20 +146,16 @@ class VoyageAIEmbeddingEncoder(BaseEmbeddingEncoder):
 
         Args:
             batch: List of texts to embed.
-            client: VoyageAI client instance to use for embedding.
+            client: VoyageAI by MongoDB client instance to use for embedding.
             input_type: Type of input ("document" or "query").
 
         Returns:
             List of embedding vectors.
         """
         if self._is_context_model():
-            result = client.contextualized_embed(
-                inputs=[batch],
-                model=self.config.model_name,
-                input_type=input_type,
-                output_dimension=self.config.output_dimension,
-            )
-            return [list(emb) for emb in result.results[0].embeddings]
+            # A batch of chunks is embedded as a single document, so it is passed
+            # as a nested ``List[List[str]]``. See ``_contextualized_embed``.
+            return self._contextualized_embed([batch], client, input_type=input_type)
         else:
             result = client.embed(
                 texts=batch,
@@ -158,6 +165,36 @@ class VoyageAIEmbeddingEncoder(BaseEmbeddingEncoder):
                 output_dimension=self.config.output_dimension,
             )
             return [list(emb) for emb in result.embeddings]
+
+    def _contextualized_embed(
+        self,
+        inputs: Union[List[List[str]], List[str]],
+        client: "Client",
+        input_type: str = "document",
+    ) -> List[List[float]]:
+        """Embed inputs with a contextualized (context) embedding model.
+
+        Per the official spec the ``inputs`` argument accepts either a flat
+        ``List[str]`` or a nested ``List[List[str]]``; both formats are
+        supported here. Embeddings are flattened across all returned result
+        items in order, so the shape of ``inputs`` does not affect the output.
+        https://docs.voyageai.com/docs/contextualized-chunk-embeddings
+
+        Args:
+            inputs: Texts to embed, as a flat or nested list of strings.
+            client: VoyageAI by MongoDB client instance to use for embedding.
+            input_type: Type of input ("document" or "query").
+
+        Returns:
+            List of embedding vectors.
+        """
+        result = client.contextualized_embed(
+            inputs=inputs,
+            model=self.config.model_name,
+            input_type=input_type,
+            output_dimension=self.config.output_dimension,
+        )
+        return [list(emb) for item in result.results for emb in item.embeddings]
 
     def embed_documents(self, elements: List[Element]) -> List[Element]:
         """

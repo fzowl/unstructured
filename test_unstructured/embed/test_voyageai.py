@@ -94,6 +94,64 @@ def test_embed_documents_contextual_model(mocker):
     mock_client.contextualized_embed.assert_called_once()
 
 
+def test_embed_documents_contextual_model_voyage_context_4(mocker):
+    """Test embedding with the current voyage-context-4 model."""
+    contextualized_response = Mock()
+    result_item = Mock()
+    result_item.embeddings = [[1.0] * 1024, [2.0] * 1024]
+    contextualized_response.results = [result_item]
+
+    mock_client = mocker.MagicMock()
+    mock_client.contextualized_embed.return_value = contextualized_response
+    mock_client.tokenize.return_value = [[1, 2], [1, 2, 3]]
+
+    mocker.patch.object(VoyageAIEmbeddingConfig, "get_client", return_value=mock_client)
+
+    encoder = VoyageAIEmbeddingEncoder(
+        config=VoyageAIEmbeddingConfig(api_key="api_key", model_name="voyage-context-4")
+    )
+    elements = encoder.embed_documents(
+        elements=[Text("Context document 1"), Text("Context document 2")],
+    )
+    assert len(elements) == 2
+    # A batch of chunks is sent as a single document: nested List[List[str]].
+    call_kwargs = mock_client.contextualized_embed.call_args[1]
+    assert call_kwargs["inputs"] == [["Context document 1", "Context document 2"]]
+
+
+def test_contextualized_embed_accepts_both_input_formats(mocker):
+    """The contextualized_embed call supports both List[str] and List[List[str]]."""
+    mock_client = mocker.MagicMock()
+    mocker.patch.object(VoyageAIEmbeddingConfig, "get_client", return_value=mocker.MagicMock())
+    encoder = VoyageAIEmbeddingEncoder(
+        config=VoyageAIEmbeddingConfig(api_key="api_key", model_name="voyage-context-4")
+    )
+
+    # Nested List[List[str]] spanning multiple result items (documents).
+    nested_response = Mock()
+    item_a = Mock()
+    item_a.embeddings = [[1.0] * 4, [2.0] * 4]
+    item_b = Mock()
+    item_b.embeddings = [[3.0] * 4]
+    nested_response.results = [item_a, item_b]
+    mock_client.contextualized_embed.return_value = nested_response
+
+    nested = encoder._contextualized_embed([["a", "b"], ["c"]], mock_client)
+    # Embeddings are flattened across all result items in order.
+    assert nested == [[1.0] * 4, [2.0] * 4, [3.0] * 4]
+
+    # Flat List[str] (single result item).
+    flat_response = Mock()
+    flat_item = Mock()
+    flat_item.embeddings = [[9.0] * 4]
+    flat_response.results = [flat_item]
+    mock_client.contextualized_embed.return_value = flat_response
+
+    flat = encoder._contextualized_embed(["query"], mock_client, input_type="query")
+    assert flat == [[9.0] * 4]
+    assert mock_client.contextualized_embed.call_args[1]["inputs"] == ["query"]
+
+
 def test_count_tokens(mocker):
     """Test token counting functionality."""
     mock_client = mocker.MagicMock()
@@ -142,6 +200,19 @@ def test_get_token_limit(mocker):
     # Test voyage-2 model
     config_v2 = VoyageAIEmbeddingConfig(api_key="api_key", model_name="voyage-2")
     assert config_v2.get_token_limit() == 320_000
+
+    # Test current voyage-4 models
+    config_v4_lite = VoyageAIEmbeddingConfig(api_key="api_key", model_name="voyage-4-lite")
+    assert config_v4_lite.get_token_limit() == 1_000_000
+
+    config_v4 = VoyageAIEmbeddingConfig(api_key="api_key", model_name="voyage-4")
+    assert config_v4.get_token_limit() == 320_000
+
+    config_v4_large = VoyageAIEmbeddingConfig(api_key="api_key", model_name="voyage-4-large")
+    assert config_v4_large.get_token_limit() == 120_000
+
+    config_context_4 = VoyageAIEmbeddingConfig(api_key="api_key", model_name="voyage-context-4")
+    assert config_context_4.get_token_limit() == 32_000
 
     # Test unknown model (should use default)
     config_unknown = VoyageAIEmbeddingConfig(api_key="api_key", model_name="unknown-model")

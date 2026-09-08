@@ -1,3 +1,9 @@
+## 0.27.6-dev0
+
+### Enhancements
+
+- **Refresh the VoyageAI by MongoDB embedding integration.** The model token-limit table now tracks the models currently listed at docs.voyageai.com — the `voyage-4` series (`voyage-4-large`, `voyage-4`, `voyage-4-lite`, `voyage-4-nano`), `voyage-code-4` and `voyage-context-4` are added while the legacy models remain accepted. The contextualized embedding path now calls `contextualized_embed` per the official signature, accepting either a flat `List[str]` or a nested `List[List[str]]` for `inputs`.
+
 ## 0.27.5
 
 ### Fixes
