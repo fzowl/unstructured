@@ -11,9 +11,16 @@ from unstructured.utils import requires_dependencies
 if TYPE_CHECKING:
     from voyageai import Client
 
-# Token limits for different VoyageAI models
+# Per-request total token limits for different Voyage AI by MongoDB models.
+# NOTE: voyage-code-4 has no documented per-request token limit, so it is intentionally not listed
+# and uses the default of `VoyageAIEmbeddingConfig.get_token_limit()`.
 VOYAGE_TOTAL_TOKEN_LIMITS = {
-    "voyage-context-3": 32_000,
+    "voyage-4-large": 120_000,
+    "voyage-4": 320_000,
+    "voyage-4-lite": 1_000_000,
+    # Contextualized models: 120K tokens per request when auto-chunking (document inputs).
+    "voyage-context-4": 120_000,
+    "voyage-context-3": 120_000,
     "voyage-3.5-lite": 1_000_000,
     "voyage-3.5": 320_000,
     "voyage-2": 320_000,
@@ -35,6 +42,11 @@ VOYAGE_TOTAL_TOKEN_LIMITS = {
 # Batch size for embedding requests (max documents per batch)
 MAX_BATCH_SIZE = 1000
 
+# Contextualized models: server-side chunk size in tokens. It equals the per-chunk context window,
+# so a text of at most this many tokens yields exactly one chunk and one vector. A text that is
+# split into several chunks is rejected after the API call.
+CONTEXTUALIZED_CHUNK_SIZE = 32_000
+
 
 class VoyageAIEmbeddingConfig(EmbeddingConfig):
     api_key: SecretStr
@@ -49,7 +61,7 @@ class VoyageAIEmbeddingConfig(EmbeddingConfig):
         extras="embed-voyageai",
     )
     def get_client(self) -> "Client":
-        """Creates a VoyageAI python client to embed elements."""
+        """Creates a Voyage AI by MongoDB python client to embed elements."""
         from voyageai import Client
 
         return Client(
@@ -91,7 +103,7 @@ class VoyageAIEmbeddingEncoder(BaseEmbeddingEncoder):
 
         Args:
             texts: List of texts to batch.
-            client: VoyageAI client instance to use for tokenization.
+            client: Voyage AI by MongoDB client instance to use for tokenization.
 
         Yields:
             Batches of texts as lists.
@@ -135,20 +147,14 @@ class VoyageAIEmbeddingEncoder(BaseEmbeddingEncoder):
 
         Args:
             batch: List of texts to embed.
-            client: VoyageAI client instance to use for embedding.
+            client: Voyage AI by MongoDB client instance to use for embedding.
             input_type: Type of input ("document" or "query").
 
         Returns:
             List of embedding vectors.
         """
         if self._is_context_model():
-            result = client.contextualized_embed(
-                inputs=[batch],
-                model=self.config.model_name,
-                input_type=input_type,
-                output_dimension=self.config.output_dimension,
-            )
-            return [list(emb) for emb in result.results[0].embeddings]
+            return self._embed_batch_contextualized(batch, client, input_type)
         else:
             result = client.embed(
                 texts=batch,
@@ -158,6 +164,50 @@ class VoyageAIEmbeddingEncoder(BaseEmbeddingEncoder):
                 output_dimension=self.config.output_dimension,
             )
             return [list(emb) for emb in result.embeddings]
+
+    def _embed_batch_contextualized(
+        self, batch: List[str], client: "Client", input_type: str
+    ) -> List[List[float]]:
+        """
+        Embed a batch of texts with a contextualized embedding model.
+
+        Documents use server-side auto-chunking, which requires `input_type="document"` and a flat
+        list with one string per document, so each text is embedded as its own document and
+        does not share context with the other texts of the batch. Queries are not auto-chunked:
+        each query is its own single-chunk input.
+
+        Args:
+            batch: List of texts to embed.
+            client: Voyage AI by MongoDB client instance to use for embedding.
+            input_type: Type of input ("document" or "query").
+
+        Returns:
+            One embedding vector per text, in input order.
+        """
+        if input_type == "document":
+            result = client.contextualized_embed(
+                inputs=batch,
+                model=self.config.model_name,
+                input_type=input_type,
+                output_dimension=self.config.output_dimension,
+                enable_auto_chunking=True,
+                chunk_size=CONTEXTUALIZED_CHUNK_SIZE,
+            )
+            for i, item in enumerate(result.results):
+                if len(item.embeddings) != 1:
+                    raise ValueError(
+                        f"Text {i} was split into {len(item.embeddings)} chunks; "
+                        f"each text must fit in a single {CONTEXTUALIZED_CHUNK_SIZE}-token chunk."
+                    )
+            return [list(item.embeddings[0]) for item in result.results]
+
+        result = client.contextualized_embed(
+            inputs=[[text] for text in batch],
+            model=self.config.model_name,
+            input_type=input_type,
+            output_dimension=self.config.output_dimension,
+        )
+        return [list(item.embeddings[0]) for item in result.results]
 
     def embed_documents(self, elements: List[Element]) -> List[Element]:
         """
